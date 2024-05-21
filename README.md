@@ -1,6 +1,6 @@
 # FedMKD
 
-*PyTorch implementation for paper "Break the Gap: Federated Self-Supervised Learning of Global Representation Models with Hybrid Heterogeneity"*
+*PyTorch implementation for paper "Resource-Aware Federated Self-Supervised Learning with Global Class Representations"*
 
 We apply our code based on the EasyFL.
 >https://github.com/EasyFL-AI/EasyFL
