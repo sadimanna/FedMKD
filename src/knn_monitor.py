@@ -3,7 +3,6 @@ import torch.nn.functional as F
 from tqdm import tqdm
 torch.multiprocessing.set_sharing_strategy('file_system')
 
-# code is obtained from https://colab.research.google.com/github/facebookresearch/moco/blob/colab-notebook/colab/moco_cifar10_demo.ipynb#scrollTo=lzFyFnhbk8hj
 # test using a knn monitor
 def knn_monitor(net, memory_data_loader, test_data_loader, k=200, t=0.1, hide_progress=False, device=None):
     net.eval()
@@ -42,8 +41,6 @@ def knn_monitor(net, memory_data_loader, test_data_loader, k=200, t=0.1, hide_pr
     return total_top1 / total_num * 100
 
 
-# knn monitor as in InstDisc https://arxiv.org/abs/1805.01978
-# implementation follows http://github.com/zhirongw/lemniscate.pytorch and https://github.com/leftthomas/SimCLR
 def knn_predict(feature, feature_bank, feature_labels, classes, knn_k, knn_t):
     # compute cos similarity between each feature vector and feature bank ---> [B, N]
     sim_matrix = torch.mm(feature, feature_bank)
