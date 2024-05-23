@@ -100,7 +100,6 @@ if __name__ == "__main__":
 
     # get data loaders
     train_loader, test_loader = get_data_loaders(args.dataset, args.image_size, args.batch_size, args.num_workers)
-    # args.model_path = "/home/lmy/easyfl/applications/myfedun/saved_models/cifar10_ours_mix_byolserver_5_resnet18_class_0.5_5_5_1_128_iid_small_314/global_model.pth"
     # get model
     resnet = get_encoder_network(args.model, args.encoder_network)
     load_model = torch.load(args.model_path, map_location=device)
