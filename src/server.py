@@ -49,7 +49,6 @@ def ignore_resize_warning(message, category, filename, lineno, file=None, line=N
     return False
 
 
-# 将警告过滤器应用到特定的警告消息
 warnings.showwarning = ignore_resize_warning
 
 
@@ -255,9 +254,9 @@ class MyDistillServer(BaseClient):
                     R_clis_x2 = torch.zeros(x2.size(0), len(self.client_models), self.projection_size)
                     for c, client_model in enumerate(self.client_models):
                         R_cli_x1 = client_model(x1)
-                        R_clis_x1[:, c, :] = R_cli_x1  # 使用适当的索引
+                        R_clis_x1[:, c, :] = R_cli_x1  
                         R_cli_x2 = client_model(x2)
-                        R_clis_x2[:, c, :] = R_cli_x2  # 使用适当的索引
+                        R_clis_x2[:, c, :] = R_cli_x2  
                     client_result = torch.cat([R_clis_x1, R_clis_x2], dim=0).to(device)  # 2B * N * K
                 optimizer.zero_grad()
                 with autocast():
