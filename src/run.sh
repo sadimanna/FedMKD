@@ -16,7 +16,7 @@ server_epoch=("5")
 
 for sp in "${server_epoch[@]}"; do
 
-  other_args="python test.py --dataset cifar10 --client_model byol --num_of_clients 5 --data_size ${data_size} --encoder_network ${encoder_network} --aggregate_encoder online --update_encoder online --update_predictor global --test_every 5 --batch_size 128 --local_epoch 5 --server_epoch ${sp} --rounds ${rounds} --gpu ${gpu} --public_size ${public_size}"
+  other_args="python main.py --dataset cifar10 --client_model byol --num_of_clients 5 --data_size ${data_size} --encoder_network ${encoder_network} --aggregate_encoder online --update_encoder online --update_predictor global --test_every 5 --batch_size 128 --local_epoch 5 --server_epoch ${sp} --rounds ${rounds} --gpu ${gpu} --public_size ${public_size}"
 
   for public in "${public_type[@]}"; do
     # 循环遍历不同的data_partition值
