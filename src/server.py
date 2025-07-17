@@ -12,6 +12,8 @@ import torch.nn.functional as F
 from torch.cuda.amp import autocast as autocast, GradScaler
 import os
 
+from tqdm import tqdm
+
 import model
 import utils
 from communication import ONLINE, TARGET, BOTH, LOCAL, GLOBAL, DAPU, NONE, EMA, DYNAMIC_DAPU, DYNAMIC_EMA_ONLINE, \
@@ -214,7 +216,8 @@ class MyDistillServer(BaseClient):
         start_time = time.time()
         # gpus = device
         # device = device[0]
-        utils.init_distributed_mode(args)
+        if not torch.distributed.is_initialized():
+            utils.init_distributed_mode(args)
         self.model.train()
         self.model.to(device)
         # self.model = nn.DataParallel(self.model, device_ids=gpus)
@@ -236,7 +239,7 @@ class MyDistillServer(BaseClient):
         # self.client_models.to(device)
         # print(next(self.client_models[0].parameters()).device)
 
-        for i in range(conf.server_epoch):
+        for i in tqdm(range(conf.server_epoch)):
             idx = len(self.train_loader)
             # print("idx is ", idx)
             # if conf.data_number == 'small':
@@ -257,7 +260,7 @@ class MyDistillServer(BaseClient):
                         R_clis_x1[:, c, :] = R_cli_x1  
                         R_cli_x2 = client_model(x2)
                         R_clis_x2[:, c, :] = R_cli_x2  
-                    client_result = torch.cat([R_clis_x1, R_clis_x2], dim=0).to(device)  # 2B * N * K
+                    client_result = torch.cat([R_clis_x1, R_clis_x2], dim=0).to(device)  # 2B * N * proj_size / K
                 optimizer.zero_grad()
                 with autocast():
                     loss = self.model(x1, x2, client_result, device)
