@@ -9,9 +9,9 @@ from torch import nn
 from easyfl.models.model import BaseModel
 from easyfl.models.resnet import ResNet18, ResNet34, ResNet50
 from easyfl.models.simple_cnn import Model
-from easyfl.models.vgg9 import VGG9
+from vgg9 import VGG9
 import logging
-from cka import cka_score
+# from cka import cka_score
 
 logger = logging.getLogger(__name__)
 
@@ -65,9 +65,13 @@ def get_model(model, encoder_network, predictor_network=TwoLayer):
     elif encoder_network == CNN:
         net = Model()
     elif encoder_network == VGG:
+        # print("########## VGG #############")
         net = VGG9()
+        # print(net)
     elif encoder_network == SRESNET18:
         net = models.resnet18(pretrained = True)
+
+    # print(net)
 
     if model == Symmetric:
         if encoder_network == RESNET50:
@@ -96,15 +100,15 @@ def get_model(model, encoder_network, predictor_network=TwoLayer):
     elif model == 'WeightServer':
         return WeightServerModel(net=net, stop_gradient=stop_gradient, has_predictor=has_predictor,
                                 predictor_network=predictor_network)
-    elif model == FedMD:
-        return FedmdServerModel(net=net, stop_gradient=stop_gradient, has_predictor=has_predictor,
-                                predictor_network=predictor_network)
-    elif model == 'single':
-        return SingleServerModel(net=net, stop_gradient=stop_gradient, has_predictor=has_predictor,
-                                 predictor_network=predictor_network)
-    elif model == 'ssfl':
-        return SSFLServerModel(net=net, stop_gradient=stop_gradient, has_predictor=has_predictor,
-                               predictor_network=predictor_network)
+    # elif model == FedMD:
+    #     return FedmdServerModel(net=net, stop_gradient=stop_gradient, has_predictor=has_predictor,
+    #                             predictor_network=predictor_network)
+    # elif model == 'single':
+    #     return SingleServerModel(net=net, stop_gradient=stop_gradient, has_predictor=has_predictor,
+    #                              predictor_network=predictor_network)
+    # elif model == 'ssfl':
+    #     return SSFLServerModel(net=net, stop_gradient=stop_gradient, has_predictor=has_predictor,
+    #                            predictor_network=predictor_network)
     elif model == 'fedet':
         return WeightServerModel(net=net, stop_gradient=stop_gradient, has_predictor=has_predictor,
                                 predictor_network=predictor_network)
@@ -147,6 +151,231 @@ def get_encoder_network(model, encoder_network, num_classes=10, projection_size=
 
     return resnet
 
+# ------------- SimCLR Model -----------------
+
+
+class SimCLRModel(BaseModel):
+    def __init__(self, net=ResNet18(), image_size=32, projection_size=2048, projection_hidden_size=4096):
+        super().__init__()
+
+        self.online_encoder = net
+        self.online_encoder.fc = MLP(net.feature_dim, projection_size, projection_hidden_size)  # projector
+
+    def forward(self, image):
+        return self.online_encoder(image)
+
+# ------------- MoCo Model -----------------
+
+
+class MoCoModel(BaseModel):
+    def __init__(self, net=ResNet18, dim=128, K=4096, m=0.99, T=0.1, bn_splits=8, symmetric=True, mlp=False):
+        super().__init__()
+
+        self.K = K
+        self.m = m
+        self.T = T
+        self.symmetric = symmetric
+
+        # create the encoders
+        self.encoder_q = net(num_classes=dim)
+        self.encoder_k = net(num_classes=dim)
+
+        if mlp:
+            feature_dim = self.encoder_q.feature_dim
+            self.encoder_q.fc = MLP(feature_dim, dim, feature_dim)
+            self.encoder_k.fc = MLP(feature_dim, dim, feature_dim)
+
+        for param_q, param_k in zip(self.encoder_q.parameters(), self.encoder_k.parameters()):
+            param_k.data.copy_(param_q.data)  # initialize
+            param_k.requires_grad = False  # not update by gradient
+
+        # create the queue
+        self.register_buffer("queue", torch.randn(dim, K))
+        self.queue = nn.functional.normalize(self.queue, dim=0)
+
+        self.register_buffer("queue_ptr", torch.zeros(1, dtype=torch.long))
+
+    @torch.no_grad()
+    def reset_key_encoder(self):
+        """
+        Momentum update of the key encoder
+        """
+        for param_q, param_k in zip(self.encoder_q.parameters(), self.encoder_k.parameters()):
+            param_k.data.copy_(param_q.data)  # initialize
+            param_k.requires_grad = False  # not update by gradient
+
+    @torch.no_grad()
+    def _momentum_update_key_encoder(self):
+        """
+        Momentum update of the key encoder
+        """
+        for param_q, param_k in zip(self.encoder_q.parameters(), self.encoder_k.parameters()):
+            param_k.data = param_k.data * self.m + param_q.data * (1. - self.m)
+
+    @torch.no_grad()
+    def _dequeue_and_enqueue(self, keys):
+        batch_size = keys.shape[0]
+
+        ptr = int(self.queue_ptr)
+        assert self.K % batch_size == 0  # for simplicity
+
+        # replace the keys at ptr (dequeue and enqueue)
+        self.queue[:, ptr:ptr + batch_size] = keys.t()  # transpose
+        ptr = (ptr + batch_size) % self.K  # move pointer
+
+        self.queue_ptr[0] = ptr
+
+    @torch.no_grad()
+    def _batch_shuffle_single_gpu(self, x, device):
+        """
+        Batch shuffle, for making use of BatchNorm.
+        """
+        # random shuffle index
+        idx_shuffle = torch.randperm(x.shape[0]).to(device)
+
+        # index for restoring
+        idx_unshuffle = torch.argsort(idx_shuffle)
+
+        return x[idx_shuffle], idx_unshuffle
+
+    @torch.no_grad()
+    def _batch_unshuffle_single_gpu(self, x, idx_unshuffle):
+        """
+        Undo batch shuffle.
+        """
+        return x[idx_unshuffle]
+
+    def contrastive_loss(self, im_q, im_k, device):
+        # compute query features
+        q = self.encoder_q(im_q)  # queries: NxC
+        q = nn.functional.normalize(q, dim=1)  # already normalized
+
+        # compute key features
+        with torch.no_grad():  # no gradient to keys
+            # shuffle for making use of BN
+            im_k_, idx_unshuffle = self._batch_shuffle_single_gpu(im_k, device)
+
+            k = self.encoder_k(im_k_)  # keys: NxC
+            k = nn.functional.normalize(k, dim=1)  # already normalized
+
+            # undo shuffle
+            k = self._batch_unshuffle_single_gpu(k, idx_unshuffle)
+
+        # compute logits
+        # Einstein sum is more intuitive
+        # positive logits: Nx1
+        l_pos = torch.einsum('nc,nc->n', [q, k]).unsqueeze(-1)
+        # negative logits: NxK
+        l_neg = torch.einsum('nc,ck->nk', [q, self.queue.clone().detach()])
+
+        # logits: Nx(1+K)
+        logits = torch.cat([l_pos, l_neg], dim=1)
+
+        # apply temperature
+        logits /= self.T
+
+        # labels: positive key indicators
+        labels = torch.zeros(logits.shape[0], dtype=torch.long).to(device)
+
+        loss = nn.CrossEntropyLoss().to(device)(logits, labels)
+
+        return loss, q, k
+
+    def forward(self, im1, im2, device):
+        """
+        Input:
+            im_q: a batch of query images
+            im_k: a batch of key images
+        Output:
+            loss
+        """
+
+        # update the key encoder
+        with torch.no_grad():  # no gradient to keys
+            self._momentum_update_key_encoder()
+
+        # compute loss
+        if self.symmetric:  # asymmetric loss
+            loss_12, q1, k2 = self.contrastive_loss(im1, im2, device)
+            loss_21, q2, k1 = self.contrastive_loss(im2, im1, device)
+            loss = loss_12 + loss_21
+            k = torch.cat([k1, k2], dim=0)
+        else:  # asymmetric loss
+            loss, q, k = self.contrastive_loss(im1, im2, device)
+
+        self._dequeue_and_enqueue(k)
+
+        return loss
+
+
+# ------------- SymmetricModel Model -----------------
+
+
+class SymmetricModel(BaseModel):
+    def __init__(
+            self,
+            net=ResNet18(),
+            image_size=32,
+            projection_size=2048,
+            projection_hidden_size=4096,
+            stop_gradient=True
+    ):
+        super().__init__()
+
+        self.online_encoder = net
+        self.online_encoder.fc = MLP(net.feature_dim, projection_size, projection_hidden_size)  # projector
+
+        self.stop_gradient = stop_gradient
+
+        # send a mock image tensor to instantiate singleton parameters
+        self.forward(torch.randn(2, 3, image_size, image_size), torch.randn(2, 3, image_size, image_size))
+
+    def forward(self, image_one, image_two):
+        f = self.online_encoder
+        z1, z2 = f(image_one), f(image_two)
+        if self.stop_gradient:
+            loss = D(z1, z2)
+        else:
+            loss = D_NO_SG(z1, z2)
+        return loss
+
+
+# ------------- SimSiam Model -----------------
+
+
+class SimSiamModel(BaseModel):
+    def __init__(
+            self,
+            net=ResNet18(),
+            image_size=32,
+            projection_size=2048,
+            projection_hidden_size=4096,
+            stop_gradient=True,
+    ):
+        super().__init__()
+
+        self.online_encoder = net
+        self.online_encoder.fc = MLP(net.feature_dim, projection_size, projection_hidden_size)  # projector
+
+        self.online_predictor = MLP(
+            projection_size, projection_size, projection_hidden_size
+        )
+
+        self.stop_gradient = stop_gradient
+
+        # send a mock image tensor to instantiate singleton parameters
+        self.forward(torch.randn(2, 3, image_size, image_size), torch.randn(2, 3, image_size, image_size))
+
+    def forward(self, image_one, image_two):
+        f, h = self.online_encoder, self.online_predictor
+        z1, z2 = f(image_one), f(image_two)
+        p1, p2 = h(z1), h(z2)
+        if self.stop_gradient:
+            loss = D(p1, z2) / 2 + D(p2, z1) / 2
+        else:
+            loss = D_NO_SG(p1, z2) / 2 + D_NO_SG(p2, z1) / 2
+
+        return loss
 
 
 class MLP(nn.Module):
@@ -194,7 +423,7 @@ class SimilarityModel(nn.Module):
 class SelfAttention(nn.Module):
     def __init__(self, k_dim):
         super(SelfAttention, self).__init__()
-        self.query_weight = nn.Parameter(torch.randn(k_dim, 1))
+        self.query_weight = nn.Parameter(torch.randn(k_dim, k_dim))
         self.key_weight = nn.Parameter(torch.randn(k_dim, k_dim))
         self.scale = torch.sqrt(torch.tensor(k_dim, dtype=torch.float32))
 
@@ -207,8 +436,10 @@ class SelfAttention(nn.Module):
         Returns:
         torch.Tensor: N个权重，形状为[N]
         """
-        query = torch.matmul(query, self.query_weight).transpose(0, -1) / self.scale
+        # print(query.shape, keys.shape)
+        query = torch.matmul(query, self.query_weight)  / self.scale #.transpose(-2, -1) / self.scale
         keys = torch.matmul(keys, self.key_weight) / self.scale
+        # print(query.shape, keys.shape, keys.transpose(-1, -2).shape)
         scores = torch.matmul(query, keys.transpose(-1, -2))  # 计算query和keys之间的点积，得分形状为[1, N]
         weights = F.softmax(scores, dim=-1)  # 在最后一个维度上应用softmax以得到权重，权重的形状为[1, N]
 
@@ -258,8 +489,11 @@ class BYOLModel(BaseModel):
         super().__init__()
 
         self.online_encoder = net
-        if not hasattr(net, 'feature_dim'):
+        # print(net)
+        if not hasattr(net, 'feature_dim') and not hasattr(net, 'fc'):
             feature_dim = list(net.children())[-1].in_features
+        elif not hasattr(net, 'feature_dim') and hasattr(net, 'fc'):
+            feature_dim = net.fc.in_features
         else:
             feature_dim = net.feature_dim
         self.online_encoder.fc = MLP(feature_dim, projection_size, projection_hidden_size)  # projector
@@ -542,9 +776,11 @@ class BYOLServerModel(BaseModel):
             tmp_client_result = client_result[:, i, :].squeeze(dim=1)
             K_result[:, i, :] = self.K_predictor(tmp_client_result)
         K_online_pred = self.K_predictor(online_pred).unsqueeze(dim=1)
+        # print(K_online_pred.shape, K_result.shape, client_result.shape) #[2B, 1, K], [2B, N, K], [2B, N, 2048]
         weight = self.sim_module(K_online_pred, K_result)  # 2B * N
+        # print(weight.shape)
         #  calculate weighted knowledge
-        teacher_q = torch.sum(weight.unsqueeze(2) * client_result, dim=1)  # 2B*N*1 * 2B*N*dim = 2B*dim
+        teacher_q = torch.sum(weight.transpose(-2,-1) * client_result, dim=1)  # 2B*N*1 * 2B*N*dim = 2B*dim
 
         if self.stop_gradient:
             with torch.no_grad():
