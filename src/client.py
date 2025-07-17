@@ -204,7 +204,7 @@ class FedSSLClient(BaseClient):
         self.train_loss = []
         self.model.to(device)
         old_model = copy.deepcopy(nn.Sequential(*list(self.model.children())[:-1])).cpu()
-        for i in range(conf.local_epoch):
+        for i in tqdm(range(conf.local_epoch)):
             if conf.data_number == 'small':
                 idx = 30
             else:
@@ -264,7 +264,7 @@ class FedSSLClient(BaseClient):
         old_model = copy.deepcopy(nn.Sequential(*list(self.model.children())[:-1])).cpu()
         idx = len(self.train_loader)
         for i in range(conf.local_epoch):
-            print(i)
+            # print(i)
             batch_loss = []
             for (batched_x1, batched_x2), _ in self.train_loader:
                 x1, x2 = batched_x1.to(device), batched_x2.to(device)
