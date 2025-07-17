@@ -13,8 +13,10 @@ import copy
 import time
 import scipy.sparse as sp
 from torchvision import models
-
+import copy
 import warnings
+
+from tqdm import tqdm
 
 warnings.filterwarnings("ignore")
 
@@ -40,20 +42,36 @@ from easyfl.datasets.data import CIFAR100
 from easyfl.coordinator import Coordinator
 from client import FedSSLClient
 from server import MyDistillServer
-from Fedmd_server import FedmdServer
+# from Fedmd_server import FedmdServer
 from fedema_server import FedSSLServer
-from distillServer import distillServer
+# from distillServer import distillServer
 import logging
 import torch.distributed as dist
 
 if torch.cuda.is_available():
     torch.backends.cudnn.deterministic = True
 
-
 model_dir = args.save_model_path
 CIFAR100 = "cifar100"
 logger = logging.getLogger(__name__)
 
+
+# def setup(rank, world_size): 
+#     """ 
+#     Initialize the process group for distributed training. 
+#     """ 
+#     # Initialize the process group using NCCL backend 
+#     dist.init_process_group("nccl")
+#     local_rank = int(os.environ["LOCAL_RANK"])
+#     global_rank = int(os.environ["RANK"])
+#     torch.cuda.set_device(local_rank)
+#     return local_rank, global_rank
+
+# def cleanup(): 
+#     """ 
+#     Destroy the process group after training is complete. 
+#     """ 
+#     dist.destroy_process_group() 
 
 def ignore_resize_warning(message, category, filename, lineno, file=None, line=None):
     if "An output with one or more elements was resized" in str(message):
@@ -67,7 +85,7 @@ warnings.showwarning = ignore_resize_warning
 def client_main(client_list, data_list, device, epoch, clients, train_data, test_data, config):
     # return client model parameters
     new_model_weights = []
-    for idx in range(len(client_list)):
+    for idx in tqdm(range(len(client_list))):
         client = client_list[idx]
         client_name = data_list[idx]
         client_i = FedSSLClient(client_name, config, train_data, test_data, device, epoch)
@@ -84,8 +102,8 @@ def client_main(client_list, data_list, device, epoch, clients, train_data, test
         # Train
         client_i.train(config.client, device=device)
         # save model
-        if (epoch + 1) % args.test_every == 0:
-            client_i.save_model()
+        # if (epoch + 1) % args.test_every == 0:
+        #     client_i.save_model()
         tmp_model = client_i.model.cpu()
         new_model_weights.append(tmp_model)
     return new_model_weights
@@ -136,7 +154,7 @@ def client_align(ori_client, server_model, public_dataset, device, config):
     # output: clients model
     new_model_weights = []
     start_time = time.time()
-    for idx in range(len(ori_client)):
+    for idx in tqdm(range(len(ori_client))):
         client_config = config
         client_config.client.momentum_update = False
         client_config.client.local_epoch = 1
@@ -271,17 +289,22 @@ if __name__ == '__main__':
                                                                args.label_ratio)
         print(train_data.dtype())
 
+    # print("######################")
+    # print("######################")
     small_client_network = get_model(args.client_model, "resnet18", args.predictor_network)
+    # print("***********************")
     middel_client_network = get_model(args.client_model, "resnet34", args.predictor_network)
+    # print("$$$$$$$$$$$$$$$$$$$$$$")
     vgg_client_network = get_model(args.client_model, "vgg", args.predictor_network)
+    # print("@@@@@@@@@@@@@@@@@@@@@@")
+    # print(vgg_client_network)
 
     if args.framework in ['ours', 'single', 'oursnoalign']:
         # define server model
-        server_model = get_model(args.server_model, args.encoder_network, args.predictor_network)
+        server_model = get_model(args.server_model, args.encoder_network, args.predictor_network) #BYOLServerModel is instantiated in get_model
         model_path = os.path.join(model_dir, 'saved_models', task_id, 'global_model.pth')
         print(model_path)
-        if os.path.exists(model_path):
-            print("load successfully")
+        if os.path.exists(model_path) and args.resume:
             load_model = torch.load(model_path)
             new_model = OrderedDict()
             for k, v in load_model.items():
@@ -294,8 +317,10 @@ if __name__ == '__main__':
                     name = k
                     new_model[k]=v
             server_model.load_state_dict(new_model)
+            print("loaded successfully")
 
     coord = Coordinator()
+    # print(config)
     coord, config = easyfl.init(config, init_all=False)
     train_data = coord.train_data
     test_data = coord.test_data
@@ -313,10 +338,13 @@ if __name__ == '__main__':
     elif config.client_type == 'vgg':
         clients = [vgg_client_network] * args.num_of_clients
     elif config.client_type == 'mix':
-        # choices = [small_client_network, middel_client_network]
+        choices = [small_client_network, middel_client_network]
         # clients = np.random.choice(choices, args.num_of_clients, replace=True)
-        clients = [small_client_network, small_client_network, vgg_client_network, vgg_client_network,
-                   vgg_client_network]
+        clients = [copy.deepcopy(small_client_network), 
+                   copy.deepcopy(small_client_network), 
+                   copy.deepcopy(vgg_client_network), 
+                   copy.deepcopy(vgg_client_network),
+                   copy.deepcopy(vgg_client_network)]
     idx = 0
     for user in data_user:
         model_path = os.path.join(model_dir, 'saved_models', task_id, 'local_model', user, '.pth')
@@ -329,7 +357,7 @@ if __name__ == '__main__':
     avg_weights = weight / np.sum(weight)
     print('---------Start training---------')
 
-    for epoch in range(args.rounds):
+    for epoch in tqdm(range(args.rounds)):
         config.client.round_id += 1
 
         # multi-process
@@ -410,7 +438,8 @@ if __name__ == '__main__':
             fedAvg_weight = fedAvg_agg(usr_model_weights, avg_weights, public_data, devices[0], epoch)
             for idx in range(len(clients)):
                 clients[idx] = fedAvg_weight
-
+        elif config.framework == 'modfedmkd':
+            raise NotImplementedError("modfedmkd is not implemented")
         else:
             raise ValueError(f"framework type is wrong")
 
